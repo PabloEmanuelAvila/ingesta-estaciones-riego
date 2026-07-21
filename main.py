@@ -1,7 +1,7 @@
 import os
 import datetime
 from arcgis.gis import GIS
-from arcgis.features import FeatureLayer
+from arcgis.features import FeatureLayer, FeatureLayerCollection
 import pandas as pd
 from sqlalchemy import create_engine, text
 
@@ -21,15 +21,29 @@ def ejecutar_ingesta():
     if item is None:
         raise ValueError(f"No se encontró el ítem con ID {item_id}.")
 
-    # Obtener la capa adecuada
-    if hasattr(item, "layers") and item.layers:
-        feature_layer = item.layers[0]
-    elif item.url:
-        feature_layer = FeatureLayer(item.url, gis=gis)
-    else:
-        raise ValueError("No se pudo obtener la Feature Layer del ítem.")
+    print(f"Ítem encontrado: '{item.title}' (Tipo: {item.type})")
+
+    # Obtención de la capa segura sin disparar KeyError de la librería de Esri
+    feature_layer = None
     
-    # 1. Filtrar exactamente las 6 estaciones de interés
+    # Intento 1: Intentar tratarlo como FeatureLayerCollection
+    try:
+        flc = FeatureLayerCollection.fromitem(item)
+        if flc and len(flc.layers) > 0:
+            feature_layer = flc.layers[0]
+            print("Capa obtenida vía FeatureLayerCollection.")
+    except Exception as e:
+        print(f"No es una colección de capas ({e}). Intentando acceso directo por URL...")
+
+    # Intento 2: Si falla el 1, conectar directamente por la URL del servicio
+    if feature_layer is None and hasattr(item, 'url') and item.url:
+        feature_layer = FeatureLayer(item.url, gis=gis)
+        print("Capa obtenida vía URL directa.")
+
+    if feature_layer is None:
+        raise ValueError(f"No se pudo extraer una FeatureLayer válida del ítem '{item.title}'.")
+
+    # 1. Filtrar las 6 estaciones objetivo
     codigos_objetivo = ('30226', '30174', '30175', '30206', '30491', '30499')
     codigos_str = ",".join([f"'{c}'" for c in codigos_objetivo])
     where_clause = f"Codigo IN ({codigos_str})"
@@ -53,7 +67,7 @@ def ejecutar_ingesta():
     df_estaciones['latitud'] = sdf['Latitud']
     df_estaciones['longitud'] = sdf['Longitud']
 
-    # Guardar/Actualizar la dimensión 'estaciones' (Upsert simple)
+    # Upsert en la tabla 'estaciones'
     with engine.begin() as conn:
         for _, row in df_estaciones.iterrows():
             sql = text("""
