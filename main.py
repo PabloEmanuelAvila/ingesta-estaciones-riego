@@ -1,11 +1,11 @@
 import os
 import datetime
 from arcgis.gis import GIS
+from arcgis.features import FeatureLayer
 import pandas as pd
-from sqlalchemy import create_engine
+from sqlalchemy import create_engine, text
 
 def ejecutar_ingesta():
-    # 1. Leer variables de entorno (seguridad)
     agol_user = os.environ.get("AGOL_USER")
     agol_pass = os.environ.get("AGOL_PASS")
     item_id = os.environ.get("AGOL_ITEM_ID")
@@ -17,44 +17,74 @@ def ejecutar_ingesta():
     print(f"[{datetime.datetime.now()}] Conectando a ArcGIS Online...")
     gis = GIS("https://www.arcgis.com", agol_user, agol_pass)
     
-    # 2. Consultar la capa compartida
     item = gis.content.get(item_id)
-    feature_layer = item.layers[0]
+    if item is None:
+        raise ValueError(f"No se encontró el ítem con ID {item_id}.")
+
+    # Obtener la capa adecuada
+    if hasattr(item, "layers") and item.layers:
+        feature_layer = item.layers[0]
+    elif item.url:
+        feature_layer = FeatureLayer(item.url, gis=gis)
+    else:
+        raise ValueError("No se pudo obtener la Feature Layer del ítem.")
     
-    # Traer todos los registros vigentes
-    sdf = feature_layer.query(where="1=1").sdf
+    # 1. Filtrar exactamente las 6 estaciones de interés
+    codigos_objetivo = ('30226', '30174', '30175', '30206', '30491', '30499')
+    codigos_str = ",".join([f"'{c}'" for c in codigos_objetivo])
+    where_clause = f"Codigo IN ({codigos_str})"
+    
+    print(f"Consultando estaciones filtradas: {codigos_objetivo}")
+    sdf = feature_layer.query(where=where_clause).sdf
     
     if sdf.empty:
-        print("No se encontraron datos en la capa.")
+        print("No se encontraron registros para las estaciones indicadas.")
         return
 
-    # 3. Mapear y limpiar columnas según la estructura de Supabase
-    # Reemplazá los nombres entre comillas dobles si difieren en tu capa original
-    df = pd.DataFrame()
-    df['codigo'] = sdf['Codigo']
-    df['nombre'] = sdf['Nombre']
-    df['propietario'] = sdf['propietario'] if 'propietario' in sdf.columns else sdf.get('Propietario')
-    df['ciudad'] = sdf['Ciudad']
-    df['latitud'] = sdf['Latitud']
-    df['longitud'] = sdf['Longitud']
-    df['caudal_ls'] = sdf['Caudal']  # o Caudal (l/s) según la capa
-    df['nivel_m'] = sdf['Nivel']     # o Nivel (m)
-    
-    # Marca de tiempo local/UTC de la ingesta
-    df['fecha_registro'] = datetime.datetime.now(datetime.timezone.utc)
-
-    # 4. Insertar en PostgreSQL (Supabase)
-    print(f"Insertando {len(df)} registros en Supabase...")
     engine = create_engine(db_url)
-    
-    df.to_sql(
+    fecha_actual = datetime.datetime.now(datetime.timezone.utc)
+
+    # 2. Separar datos fijos (Tabla 'estaciones')
+    df_estaciones = pd.DataFrame()
+    df_estaciones['codigo'] = sdf['Codigo'].astype(str)
+    df_estaciones['nombre'] = sdf['Nombre']
+    df_estaciones['propietario'] = sdf['Propietario'] if 'Propietario' in sdf.columns else 'Sin propietario'
+    df_estaciones['ciudad'] = sdf['Ciudad'] if 'Ciudad' in sdf.columns else 'Sin ciudad'
+    df_estaciones['latitud'] = sdf['Latitud']
+    df_estaciones['longitud'] = sdf['Longitud']
+
+    # Guardar/Actualizar la dimensión 'estaciones' (Upsert simple)
+    with engine.begin() as conn:
+        for _, row in df_estaciones.iterrows():
+            sql = text("""
+                INSERT INTO estaciones (codigo, nombre, propietario, ciudad, latitud, longitud)
+                VALUES (:codigo, :nombre, :propietario, :ciudad, :latitud, :longitud)
+                ON CONFLICT (codigo) DO UPDATE SET
+                    nombre = EXCLUDED.nombre,
+                    propietario = EXCLUDED.propietario,
+                    ciudad = EXCLUDED.ciudad,
+                    latitud = EXCLUDED.latitud,
+                    longitud = EXCLUDED.longitud;
+            """)
+            conn.execute(sql, row.to_dict())
+
+    # 3. Separar datos dinámicos de lecturas (Tabla 'lecturas_estaciones')
+    df_lecturas = pd.DataFrame()
+    df_lecturas['codigo_estacion'] = sdf['Codigo'].astype(str)
+    df_lecturas['caudal_ls'] = sdf['Caudal (l/s)'] if 'Caudal (l/s)' in sdf.columns else sdf.get('Caudal', 0.0)
+    df_lecturas['nivel_m'] = sdf['Nivel (m)'] if 'Nivel (m)' in sdf.columns else sdf.get('Nivel', 0.0)
+    df_lecturas['fecha_registro'] = fecha_actual
+
+    # Insertar lecturas históricas
+    print(f"Insertando {len(df_lecturas)} lecturas históricas...")
+    df_lecturas.to_sql(
         'lecturas_estaciones', 
         engine, 
         if_exists='append', 
         index=False,
         method='multi'
     )
-    print("Ingesta completada exitosamente.")
+    print("Ingesta finalizada con éxito.")
 
 if __name__ == "__main__":
     ejecutar_ingesta()
