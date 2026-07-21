@@ -1,0 +1,4 @@
+arcgis
+pandas
+sqlalchemy
+psycopg2-binary
