@@ -1,9 +1,9 @@
 name: Ingesta de Estaciones de Riego
 
 on:
-  schedule:
+  #schedule:
     # Corre cada 30 minutos
-    - cron: '*/10 * * * *'
+    #- cron: '*/10 * * * *'
   workflow_dispatch: # Permite ejecutarlo manualmente para probar
 
 jobs:
