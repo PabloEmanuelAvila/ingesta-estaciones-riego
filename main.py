@@ -114,6 +114,12 @@ def ejecutar_ingesta():
 
     print(f"Columna de caudal detectada: '{col_caudal}'")
     print(f"Columna de nivel detectada: '{col_nivel}'")
+    if col_caudal:
+        print("Valores crudos de caudal (AGOL) por estacion:")
+        print(sdf[[col_codigo, col_caudal]].to_string(index=False))
+    if col_nivel:
+        print("Valores crudos de nivel (AGOL) por estacion:")
+        print(sdf[[col_codigo, col_nivel]].to_string(index=False))
 
     df_lecturas = pd.DataFrame()
     df_lecturas['codigo_estacion'] = sdf[col_codigo].astype(str)
