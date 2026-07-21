@@ -6,14 +6,14 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 
 def limpiar_numero(valor):
-    """Convierte texto o valores de AGOL ('SI', 'NO', None) a float o 0.0"""
+    """Convierte texto o números de AGOL ('698,99', 'SI', 'NO', None) a float correcto"""
+    if pd.isna(valor) or valor is None:
+        return 0.0
     try:
-        if pd.isna(valor):
-            return 0.0
-        # Intentar convertir directamente si es numero o string numerico
-        return float(valor)
+        # Convertir a texto, limpiar espacios y reemplazar coma decimal por punto
+        val_str = str(valor).strip().replace(',', '.')
+        return float(val_str)
     except (ValueError, TypeError):
-        # Si viene 'SI', 'NO' u otro texto no convertible, devuelve 0.0
         return 0.0
 
 def ejecutar_ingesta():
