@@ -6,15 +6,27 @@ import pandas as pd
 from sqlalchemy import create_engine, text
 
 def limpiar_numero(valor):
-    """Convierte texto o números de AGOL ('698,99', 'SI', 'NO', None) a float correcto"""
+    """Convierte texto o números de AGOL ('643,71', 'SI', 'NO', None) a float correcto"""
     if pd.isna(valor) or valor is None:
         return 0.0
     try:
-        # Convertir a texto, limpiar espacios y reemplazar coma decimal por punto
         val_str = str(valor).strip().replace(',', '.')
         return float(val_str)
     except (ValueError, TypeError):
         return 0.0
+
+def buscar_columna(df, patrones):
+    """
+    Busca dentro del DataFrame una columna que contenga alguno de los patrones indicados,
+    ignorando mayúsculas, espacios y caracteres especiales.
+    """
+    for col in df.columns:
+        col_limpia = col.lower().replace(" ", "").replace("(", "").replace(")", "").replace("/", "")
+        for patron in patrones:
+            patron_limpio = patron.lower().replace(" ", "").replace("(", "").replace(")", "").replace("/", "")
+            if patron_limpio in col_limpia:
+                return col
+    return None
 
 def ejecutar_ingesta():
     agol_user = os.environ.get("AGOL_USER")
@@ -46,7 +58,7 @@ def ejecutar_ingesta():
     if feature_layer is None:
         raise ValueError(f"No se pudo extraer una FeatureLayer válida del ítem '{item.title}'.")
 
-    # 1. Filtrar las 6 estaciones
+    # 1. Filtrar las 6 estaciones de interés
     codigos_objetivo = ('30226', '30174', '30175', '30206', '30491', '30499')
     codigos_str = ",".join([f"'{c}'" for c in codigos_objetivo])
     where_clause = f"Codigo IN ({codigos_str})"
@@ -58,17 +70,29 @@ def ejecutar_ingesta():
         print("No se encontraron registros para las estaciones indicadas.")
         return
 
+    # Imprimir columnas para diagnóstico en los logs de GitHub Actions
+    print("--- COLUMNAS ENCONTRADAS EN LA CAPA AGOL ---")
+    print(list(sdf.columns))
+    print("--------------------------------------------")
+
     engine = create_engine(db_url)
     fecha_actual = datetime.datetime.now(datetime.timezone.utc)
 
     # 2. Datos fijos (Tabla 'estaciones')
+    col_codigo = buscar_columna(sdf, ['codigo']) or 'Codigo'
+    col_nombre = buscar_columna(sdf, ['nombre']) or 'Nombre'
+    col_propietario = buscar_columna(sdf, ['propietario'])
+    col_ciudad = buscar_columna(sdf, ['ciudad'])
+    col_lat = buscar_columna(sdf, ['latitud', 'lat']) or 'Latitud'
+    col_lon = buscar_columna(sdf, ['longitud', 'lon']) or 'Longitud'
+
     df_estaciones = pd.DataFrame()
-    df_estaciones['codigo'] = sdf['Codigo'].astype(str)
-    df_estaciones['nombre'] = sdf['Nombre']
-    df_estaciones['propietario'] = sdf['Propietario'] if 'Propietario' in sdf.columns else 'Sin propietario'
-    df_estaciones['ciudad'] = sdf['Ciudad'] if 'Ciudad' in sdf.columns else 'Sin ciudad'
-    df_estaciones['latitud'] = sdf['Latitud']
-    df_estaciones['longitud'] = sdf['Longitud']
+    df_estaciones['codigo'] = sdf[col_codigo].astype(str)
+    df_estaciones['nombre'] = sdf[col_nombre]
+    df_estaciones['propietario'] = sdf[col_propietario] if col_propietario else 'Sin propietario'
+    df_estaciones['ciudad'] = sdf[col_ciudad] if col_ciudad else 'Sin ciudad'
+    df_estaciones['latitud'] = sdf[col_lat]
+    df_estaciones['longitud'] = sdf[col_lon]
 
     with engine.begin() as conn:
         for _, row in df_estaciones.iterrows():
@@ -84,21 +108,30 @@ def ejecutar_ingesta():
             """)
             conn.execute(sql, row.to_dict())
 
-    # 3. Datos dinámicos con conversión y limpieza de campos
+    # 3. Datos dinámicos (Tabla 'lecturas_estaciones')
+    col_caudal = buscar_columna(sdf, ['caudal', 'caudalls'])
+    col_nivel = buscar_columna(sdf, ['nivel', 'nivelm'])
+
+    print(f"Columna de caudal detectada: '{col_caudal}'")
+    print(f"Columna de nivel detectada: '{col_nivel}'")
+
     df_lecturas = pd.DataFrame()
-    df_lecturas['codigo_estacion'] = sdf['Codigo'].astype(str)
+    df_lecturas['codigo_estacion'] = sdf[col_codigo].astype(str)
     
-    # Identificar columna de caudal
-    col_caudal = 'Caudal (l/s)' if 'Caudal (l/s)' in sdf.columns else 'Caudal'
-    df_lecturas['caudal_ls'] = sdf[col_caudal].apply(limpiar_numero)
-    
-    # Identificar columna de nivel
-    col_nivel = 'Nivel (m)' if 'Nivel (m)' in sdf.columns else 'Nivel'
-    df_lecturas['nivel_m'] = sdf[col_nivel].apply(limpiar_numero)
-    
+    if col_caudal:
+        df_lecturas['caudal_ls'] = sdf[col_caudal].apply(limpiar_numero)
+    else:
+        print("ADVERTENCIA: No se encontró la columna de caudal.")
+        df_lecturas['caudal_ls'] = 0.0
+
+    if col_nivel:
+        df_lecturas['nivel_m'] = sdf[col_nivel].apply(limpiar_numero)
+    else:
+        print("ADVERTENCIA: No se encontró la columna de nivel.")
+        df_lecturas['nivel_m'] = 0.0
+
     df_lecturas['fecha_registro'] = fecha_actual
 
-    # Insertar lecturas históricas
     print(f"Insertando {len(df_lecturas)} lecturas históricas en Supabase...")
     df_lecturas.to_sql(
         'lecturas_estaciones', 
