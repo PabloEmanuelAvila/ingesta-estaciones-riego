@@ -1,5 +1,6 @@
 import os
 import datetime
+from zoneinfo import ZoneInfo
 from arcgis.gis import GIS
 from arcgis.features import FeatureLayer, FeatureLayerCollection
 import pandas as pd
@@ -76,7 +77,7 @@ def ejecutar_ingesta():
     print("--------------------------------------------")
 
     engine = create_engine(db_url)
-    fecha_actual = datetime.datetime.now(datetime.timezone.utc)
+    fecha_actual = datetime.datetime.now(ZoneInfo("America/Argentina/Buenos_Aires"))
 
     # 2. Datos fijos (Tabla 'estaciones')
     col_codigo = buscar_columna(sdf, ['codigo']) or 'Codigo'
