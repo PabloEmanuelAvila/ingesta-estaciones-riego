@@ -62,7 +62,8 @@ def ejecutar_ingesta():
         raise ValueError(f"No se pudo extraer una FeatureLayer válida del ítem '{item.title}'.")
 
     # 1. Filtrar las 6 estaciones de interés
-    codigos_objetivo = ('30226', '30174', '30175', '30206', '30193','30181')
+    # solo estaciones que miden caudal o nivel de lago (se quitaron 30206, 30491 y 30499: no miden caudal)
+    codigos_objetivo = ('30226', '30174', '30175', '30193', '30181')
     codigos_str = ",".join([f"'{c}'" for c in codigos_objetivo])
     where_clause = f"Codigo IN ({codigos_str})"
     
