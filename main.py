@@ -6,15 +6,17 @@ from arcgis.features import FeatureLayer, FeatureLayerCollection
 import pandas as pd
 from sqlalchemy import create_engine, text
 
+NAN = float("nan")  # pandas lo inserta como NULL en la base
+
 def limpiar_numero(valor):
-    """Convierte texto o números de AGOL ('643,71', 'SI', 'NO', None) a float correcto"""
-    if pd.isna(valor) or valor is None:
-        return 0.0
+    """Convierte texto o números de AGOL ('643,71') a float.
+    Si el dato falta o no es un número devuelve NaN (NULL en la base), NO 0."""
+    if valor is None or pd.isna(valor):
+        return NAN
     try:
-        val_str = str(valor).strip().replace(',', '.')
-        return float(val_str)
+        return float(str(valor).strip().replace(',', '.'))
     except (ValueError, TypeError):
-        return 0.0
+        return NAN
 
 def buscar_columna(df, patrones):
     """
@@ -71,6 +73,12 @@ def ejecutar_ingesta():
         print("No se encontraron registros para las estaciones indicadas.")
         return
 
+    # aviso si alguna estación pedida no volvió en la consulta (ej. 30206)
+    encontrados = set(sdf['Codigo'].astype(str)) if 'Codigo' in sdf.columns else set()
+    faltantes = [c for c in codigos_objetivo if c not in encontrados]
+    if faltantes:
+        print(f"ADVERTENCIA: la capa no devolvió estas estaciones: {faltantes}")
+
     # Imprimir columnas para diagnóstico en los logs de GitHub Actions
     print("--- COLUMNAS ENCONTRADAS EN LA CAPA AGOL ---")
     print(list(sdf.columns))
@@ -110,34 +118,48 @@ def ejecutar_ingesta():
             conn.execute(sql, row.to_dict())
 
     # 3. Datos dinámicos (Tabla 'lecturas_estaciones')
-    col_caudal = buscar_columna(sdf, ['caudal', 'caudalls'])
-    col_nivel = buscar_columna(sdf, ['nivel', 'nivelm'])
+    # Se usan los nombres exactos de la capa; si no existen, se busca por patrón
+    col_caudal = 'Caudal_ls' if 'Caudal_ls' in sdf.columns else buscar_columna(sdf, ['caudal_ls', 'caudal'])
+    col_nivel = 'Nivel_m' if 'Nivel_m' in sdf.columns else buscar_columna(sdf, ['nivel_m', 'nivel'])
+    col_ultima = 'UltimaActualizacion' if 'UltimaActualizacion' in sdf.columns else buscar_columna(sdf, ['ultimaactualizacion'])
 
-    print(f"Columna de caudal detectada: '{col_caudal}'")
-    print(f"Columna de nivel detectada: '{col_nivel}'")
-    if col_caudal:
-        print("Valores crudos de caudal (AGOL) por estacion:")
-        print(sdf[[col_codigo, col_caudal]].to_string(index=False))
-    if col_nivel:
-        print("Valores crudos de nivel (AGOL) por estacion:")
-        print(sdf[[col_codigo, col_nivel]].to_string(index=False))
+    print(f"Columna de caudal: '{col_caudal}' | nivel: '{col_nivel}' | última actualización: '{col_ultima}'")
 
     df_lecturas = pd.DataFrame()
     df_lecturas['codigo_estacion'] = sdf[col_codigo].astype(str)
-    
+
     if col_caudal:
         df_lecturas['caudal_ls'] = sdf[col_caudal].apply(limpiar_numero)
     else:
         print("ADVERTENCIA: No se encontró la columna de caudal.")
-        df_lecturas['caudal_ls'] = 0.0
+        df_lecturas['caudal_ls'] = NAN
 
     if col_nivel:
         df_lecturas['nivel_m'] = sdf[col_nivel].apply(limpiar_numero)
     else:
         print("ADVERTENCIA: No se encontró la columna de nivel.")
-        df_lecturas['nivel_m'] = 0.0
+        df_lecturas['nivel_m'] = NAN
+
+    # hora de la última medición según la capa (AGOL guarda las fechas en UTC)
+    if col_ultima:
+        serie_ultima = sdf[col_ultima]
+        if pd.api.types.is_numeric_dtype(serie_ultima):
+            # epoch en milisegundos (formato crudo de AGOL)
+            df_lecturas['ultima_actualizacion'] = pd.to_datetime(serie_ultima, unit='ms', utc=True, errors='coerce')
+        else:
+            df_lecturas['ultima_actualizacion'] = pd.to_datetime(serie_ultima, utc=True, errors='coerce')
+    else:
+        print("ADVERTENCIA: No se encontró UltimaActualizacion.")
+        df_lecturas['ultima_actualizacion'] = pd.NaT
 
     df_lecturas['fecha_registro'] = fecha_actual
+
+    # diagnóstico en el log: valor, hora de medición y antigüedad del dato
+    diag = df_lecturas[['codigo_estacion', 'caudal_ls', 'nivel_m', 'ultima_actualizacion']].copy()
+    diag['min_desde_medicion'] = ((pd.Timestamp.now(tz='UTC') - diag['ultima_actualizacion'])
+                                  .dt.total_seconds() / 60).round(0)
+    print("Lecturas a insertar:")
+    print(diag.to_string(index=False))
 
     print(f"Insertando {len(df_lecturas)} lecturas históricas en Supabase...")
     df_lecturas.to_sql(
